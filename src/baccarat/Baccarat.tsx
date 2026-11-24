@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { money, pct } from '../lib/money'
+import { Memory } from './Memory'
 import {
   defaultConfig,
   narrate,
@@ -180,6 +181,7 @@ export function Baccarat() {
           </div>
         </div>
       ) : null}
+      <Memory />
     </div>
   )
 }

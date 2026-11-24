@@ -457,6 +457,19 @@ svg { width: 100%; height: auto; display: block; }
 .bead.player { background: #8eb4d4; color: #10202c; }
 .bead.tie { background: var(--brass); color: #1a140f; }
 
+.memory {
+  margin-top: 42px;
+  padding-top: 28px;
+  border-top: 1px solid var(--line);
+}
+.memory-table .compare-head,
+.memory-table .compare-row {
+  grid-template-columns: 1.5fr repeat(5, 1fr);
+  min-width: 760px;
+}
+.compare-row.hot { color: var(--brass); }
+.tick { fill: var(--muted); font-size: 11px; font-family: var(--mono); }
+
 .slots { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin: 8px 0 14px; }
 .slot-gap { width: 10px; }
 .slot-wrap { position: relative; }
