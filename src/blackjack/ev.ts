@@ -1,6 +1,6 @@
 import { mulberry32, shufflePrefix } from '../lib/rng'
 import type { ActionName, Rules } from './types'
-import { basicAction } from './strategy'
+import { basicAction, offersFreeDouble } from './strategy'
 import { totals } from './shoe'
 
 export const TRIALS = 4000
@@ -10,7 +10,9 @@ export const TRIALS = 4000
  * The dealer has already peeked: when the upcard is an ace or a ten,
  * hole cards that would make a blackjack are rejected.
  * Later choices inside a trial follow basic strategy for these rules.
- * A split's profit includes the matched second bet. A double can return ±2.
+ * A paid split's profit includes the matched second bet. A paid double can return ±2.
+ * A free double returns +2 or −1. A free split's second hand returns +1 or 0.
+ * `risk` and `win` are the current hand's stake and win, in original-bet units.
  */
 export function priceActions(opts: {
   shoe: readonly number[]
@@ -20,6 +22,8 @@ export function priceActions(opts: {
   actions: readonly ActionName[]
   trials?: number
   seed?: number
+  risk?: number
+  win?: number
 }): Record<ActionName, number> {
   const trials = opts.trials ?? TRIALS
   const rng = mulberry32(opts.seed ?? 0x5eed)
@@ -28,7 +32,7 @@ export function priceActions(opts: {
   for (let i = 0; i < trials; i++) {
     const deck = conditionedDeck(opts.shoe, opts.dealerUp, rng)
     for (const action of simulated) {
-      sums[action] += play(deck, action, opts.player, opts.dealerUp, opts.rules)
+      sums[action] += play(deck, action, opts.player, opts.dealerUp, opts.rules, opts.risk ?? 1, opts.win ?? 1)
     }
   }
   const ev = {} as Record<ActionName, number>
@@ -71,7 +75,7 @@ function conditionedDeck(shoe: readonly number[], dealerUp: number, rng: () => n
   return deck
 }
 
-type SimHand = { cards: number[]; units: number; done: boolean }
+type SimHand = { cards: number[]; risk: number; win: number; done: boolean; aceSplit: boolean }
 
 function play(
   deck: readonly number[],
@@ -79,6 +83,8 @@ function play(
   initial: readonly number[],
   dealerUp: number,
   rules: Rules,
+  risk: number,
+  win: number,
 ): number {
   let qi = 1
   const draw = () => {
@@ -87,22 +93,29 @@ function play(
     return card
   }
   const hole = deck[0] ?? 10
-  if (action === 'R') return -0.5
+  if (action === 'R') return -0.5 * risk
 
   const hands: SimHand[] = []
   if (action === 'P') {
     const a = initial[0] ?? 0
     const b = initial[1] ?? 0
-    const aces = a === 1
-    hands.push({ cards: [a, draw()], units: 1, done: aces })
-    hands.push({ cards: [b, draw()], units: 1, done: aces })
+    const free = rules.freeBet && a !== 10
+    hands.push(splitHand(a, draw(), risk, win, a === 1))
+    hands.push(splitHand(b, draw(), free ? 0 : 1, 1, b === 1))
   } else if (action === 'D') {
-    hands.push({ cards: [...initial, draw()], units: 2, done: true })
+    const free = offersFreeDouble(initial, rules)
+    hands.push({
+      cards: [...initial, draw()],
+      risk: free ? risk : risk + 1,
+      win: win + 1,
+      done: true,
+      aceSplit: false,
+    })
   } else if (action === 'S') {
-    hands.push({ cards: [...initial], units: 1, done: true })
+    hands.push({ cards: [...initial], risk, win, done: true, aceSplit: false })
   } else {
     const cards = [...initial, draw()]
-    hands.push({ cards, units: 1, done: totals(cards).total >= 21 })
+    hands.push({ cards, risk, win, done: totals(cards).total >= 21, aceSplit: false })
   }
 
   let guard = 0
@@ -112,12 +125,16 @@ function play(
       hand.done = true
       continue
     }
+    if (hand.aceSplit && !(hand.cards.length === 2 && hand.cards[0] === 1 && hand.cards[1] === 1 && hands.length < 4)) {
+      hand.done = true
+      continue
+    }
     const splitting = hand.cards.length === 2 && hand.cards[0] === hand.cards[1] && hands.length < 4
     const act = basicAction({
       cards: hand.cards,
       dealerUp,
       rules,
-      canDouble: rules.das && hand.cards.length === 2,
+      canDouble: rules.das && hand.cards.length === 2 && !hand.aceSplit,
       canSplit: splitting,
       canSurrender: false,
     })
@@ -126,19 +143,22 @@ function play(
       continue
     }
     if (act === 'D') {
+      const free = offersFreeDouble(hand.cards, rules)
       hand.cards.push(draw())
-      hand.units = 2
+      if (!free) hand.risk += 1
+      hand.win += 1
       hand.done = true
       continue
     }
     if (act === 'P') {
-      const a = hand.cards[0]!
-      const b = hand.cards[1]!
-      const aces = a === 1
-      hand.cards = [a, draw()]
-      hand.done = aces || totals(hand.cards).total >= 21
-      const other = [b, draw()]
-      hands.push({ cards: other, units: 1, done: aces || totals(other).total >= 21 })
+      const rank = hand.cards[0]!
+      const free = rules.freeBet && rank !== 10
+      const aces = rank === 1
+      const kept = splitHand(rank, draw(), hand.risk, hand.win, aces)
+      hand.cards = kept.cards
+      hand.done = kept.done
+      hand.aceSplit = kept.aceSplit
+      hands.push(splitHand(rank, draw(), free ? 0 : 1, 1, aces))
       continue
     }
     hand.cards.push(draw())
@@ -147,8 +167,20 @@ function play(
 
   const dealer = dealerTotal(dealerUp, hole, draw, rules.hitSoft17)
   let profit = 0
-  for (const hand of hands) profit += settle(hand.cards, dealer, hand.units)
+  for (const hand of hands) profit += settle(hand.cards, dealer, hand.risk, hand.win, rules)
   return profit
+}
+
+function splitHand(rank: number, card: number, risk: number, win: number, aces: boolean): SimHand {
+  const cards = [rank, card]
+  const resplit = aces && card === 1
+  return {
+    cards,
+    risk,
+    win,
+    done: totals(cards).total >= 21 || (aces && !resplit),
+    aceSplit: aces,
+  }
 }
 
 function dealerTotal(up: number, hole: number, draw: () => number, hitSoft17: boolean): number {
@@ -162,10 +194,11 @@ function dealerTotal(up: number, hole: number, draw: () => number, hitSoft17: bo
   return t.total
 }
 
-function settle(cards: readonly number[], dealer: number, units: number): number {
+function settle(cards: readonly number[], dealer: number, risk: number, win: number, rules: Rules): number {
   const total = totals(cards).total
-  if (total > 21) return -units
-  if (dealer > 21 || total > dealer) return units
-  if (total < dealer) return -units
+  if (total > 21) return rules.noBust ? 0 : -risk
+  if (rules.freeBet && dealer === 22) return 0
+  if (dealer > 21 || total > dealer) return win
+  if (total < dealer) return -risk
   return 0
 }

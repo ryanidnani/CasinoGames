@@ -10,6 +10,7 @@ import {
   totals,
   upLabel,
 } from './shoe'
+import { offersFreeDouble, offersFreeSplit } from './strategy'
 import type { ActionName, Card, Decision, LiveHand, Rules, Table, TicketModel, TicketRow } from './types'
 import { ACTION_LABEL } from './types'
 
@@ -42,7 +43,9 @@ export function rulesLine(rules: Rules): string {
     rules.das ? 'double after split' : 'no double after split',
     rules.lateSurrender ? 'late surrender' : 'no surrender',
     rules.blackjackPays === 1.5 ? 'blackjack 3:2' : 'blackjack 6:5',
-  ].join(' · ')
+    rules.freeBet ? 'free bet' : '',
+    rules.noBust ? 'no bust' : '',
+  ].filter(Boolean).join(' · ')
 }
 
 export function setWager(table: Table, bet: number): Table {
@@ -65,13 +68,36 @@ export function legalActions(table: Table, rules: Rules): ActionName[] {
   const hand = table.hands[table.active]
   if (!hand || !isOpen(hand)) return []
   const ranks = values(hand)
-  const unit = hand.bet
-  const actions: ActionName[] = ['H', 'S']
   const twoCards = hand.cards.length === 2
-  if (twoCards && table.bankroll + 1e-9 >= unit && (!hand.fromSplit || rules.das)) actions.push('D')
-  if (twoCards && isPair(ranks) && table.hands.length < 4 && table.bankroll + 1e-9 >= unit) actions.push('P')
+  if (hand.splitAces) {
+    const actions: ActionName[] = []
+    if (twoCards && isPair(ranks) && table.hands.length < 4 && canAffordSplit(table, hand, rules)) actions.push('P')
+    actions.push('S')
+    return actions
+  }
+  const actions: ActionName[] = ['H', 'S']
+  if (twoCards && (!hand.fromSplit || rules.das) && (offersFreeDouble(ranks, rules) || table.bankroll + 1e-9 >= hand.unit)) {
+    actions.push('D')
+  }
+  if (twoCards && isPair(ranks) && table.hands.length < 4 && canAffordSplit(table, hand, rules)) actions.push('P')
   if (twoCards && !hand.fromSplit && table.hands.length === 1 && rules.lateSurrender) actions.push('R')
   return actions
+}
+
+function canAffordSplit(table: Table, hand: LiveHand, rules: Rules): boolean {
+  if (offersFreeSplit(values(hand), rules)) return true
+  return table.bankroll + 1e-9 >= hand.unit
+}
+
+function standAfterAceSplit(aces: boolean, card: Card, hand: LiveHand): boolean {
+  if (totals(values(hand)).total >= 21) return true
+  return aces && bjRank(card.rank) !== 1
+}
+
+function actionLabel(action: ActionName, ranks: readonly number[], rules: Rules): string {
+  if (action === 'D' && offersFreeDouble(ranks, rules)) return 'Free double'
+  if (action === 'P' && offersFreeSplit(ranks, rules)) return 'Free split'
+  return ACTION_LABEL[action]
 }
 
 export function deal(table: Table, rules: Rules, rng: () => number): Table {
@@ -93,10 +119,13 @@ export function deal(table: Table, rules: Rules, rng: () => number): Table {
   const hand: LiveHand = {
     cards: [p1.card, p2.card],
     bet,
+    winPay: bet,
+    unit: bet,
     doubled: false,
     stood: false,
     surrendered: false,
     fromSplit: false,
+    splitAces: false,
   }
   const next: Table = {
     ...table,
@@ -178,18 +207,20 @@ export function act(
     actions: legal,
     trials,
     seed,
+    risk: hand.unit === 0 ? 0 : hand.bet / hand.unit,
+    win: hand.unit === 0 ? 0 : hand.winPay / hand.unit,
   })
   const maxEv = Math.max(...legal.map((a) => ev[a]))
   const bestCode = legal.reduce((best, a) => (ev[a] > ev[best] ? a : best), legal[0]!)
   const regretUnits = Math.max(0, maxEv - ev[action])
   const counted = regretUnits < CLOSE ? 0 : regretUnits
-  const regret = round2(counted * hand.bet)
+  const regret = round2(counted * hand.unit)
   const decision: Decision = {
     hand: table.handsPlayed + 1,
     spot: `${sentenceHand(player)} vs ${upLabel(dealerUp)}`,
-    action: ACTION_LABEL[action],
+    action: actionLabel(action, player, rules),
     actionCode: action,
-    best: ACTION_LABEL[bestCode],
+    best: actionLabel(bestCode, player, rules),
     bestCode,
     evChosen: ev[action],
     evBest: maxEv,
@@ -197,7 +228,7 @@ export function act(
     bet: hand.bet,
     detail: `${hand.cards.map(cardText).join(' ')} vs ${cardText(table.dealer[0]!)}`,
   }
-  const ticket = actionTicket(action, player, dealerUp, legal, ev, hand.bet, trials, regret)
+  const ticket = actionTicket(action, player, dealerUp, legal, ev, hand.unit, trials, regret, false, rules)
 
   let shoe = table.shoe
   let bankroll = table.bankroll
@@ -211,8 +242,12 @@ export function act(
   } else if (action === 'S') {
     current.stood = true
   } else if (action === 'D') {
-    bankroll = round2(bankroll - current.bet)
-    current.bet = round2(current.bet * 2)
+    const free = offersFreeDouble(values(current), rules)
+    if (!free) {
+      bankroll = round2(bankroll - current.unit)
+      current.bet = round2(current.bet + current.unit)
+    }
+    current.winPay = round2(current.winPay + current.unit)
     current.doubled = true
     current.stood = true
     const drawn = popCard(shoe, rules.decks, rng)
@@ -225,23 +260,29 @@ export function act(
     if (totals(values(current)).total >= 21) current.stood = true
   } else {
     const [a, b] = current.cards
-    bankroll = round2(bankroll - current.bet)
+    const rank = bjRank(a!.rank)
+    const free = offersFreeSplit(values(current), rules)
+    if (!free) bankroll = round2(bankroll - current.unit)
     const d1 = popCard(shoe, rules.decks, rng)
     shoe = d1.shoe
     const d2 = popCard(shoe, rules.decks, rng)
     shoe = d2.shoe
-    const aces = bjRank(a!.rank) === 1
-    const left: LiveHand = { ...current, cards: [a!, d1.card], fromSplit: true }
+    const aces = rank === 1
+    const left: LiveHand = { ...current, cards: [a!, d1.card], fromSplit: true, splitAces: aces, doubled: false }
     const right: LiveHand = {
       ...current,
       cards: [b!, d2.card],
       fromSplit: true,
+      splitAces: aces,
       doubled: false,
       stood: false,
       surrendered: false,
+      bet: free ? 0 : current.unit,
+      winPay: current.unit,
+      unit: current.unit,
     }
-    if (aces || totals(values(left)).total >= 21) left.stood = true
-    if (aces || totals(values(right)).total >= 21) right.stood = true
+    left.stood = standAfterAceSplit(aces, d1.card, left) 
+    right.stood = standAfterAceSplit(aces, d2.card, right)
     hands.splice(index, 1, left, right)
   }
 
@@ -289,7 +330,7 @@ export function studyHand(
   if (isPair(player)) actions.push('P')
   if (rules.lateSurrender) actions.push('R')
   const ev = priceActions({ shoe: unseen, player, dealerUp, rules, actions, trials, seed })
-  return actionTicket('S', player, dealerUp, actions, ev, 1, trials, 0, true)
+  return actionTicket('S', player, dealerUp, actions, ev, 1, trials, 0, true, rules)
 }
 
 function finishHand(table: Table, rules: Rules, rng: () => number): Table {
@@ -326,9 +367,13 @@ function finishHand(table: Table, rules: Rules, rng: () => number): Table {
     for (const hand of table.hands) {
       if (hand.surrendered) continue
       const total = totals(values(hand)).total
-      if (total > 21) continue
-      if (dealerTotal > 21 || total > dealerTotal) bankroll = round2(bankroll + hand.bet * 2)
-      else if (total === dealerTotal) bankroll = round2(bankroll + hand.bet)
+      if (total > 21) {
+        if (rules.noBust) bankroll = round2(bankroll + hand.bet)
+        continue
+      }
+      const push = (rules.freeBet && dealerTotal === 22) || total === dealerTotal
+      if (!push && (dealerTotal > 21 || total > dealerTotal)) bankroll = round2(bankroll + hand.bet + hand.winPay)
+      else if (push) bankroll = round2(bankroll + hand.bet)
     }
   }
 
@@ -412,14 +457,27 @@ function sentenceHand(ranks: readonly number[]): string {
   return `${t.soft ? 'soft' : 'hard'} ${t.total}`
 }
 
-function choiceTitle(action: ActionName, ranks: readonly number[], dealerUp: number): string {
+function choiceTitle(action: ActionName, ranks: readonly number[], dealerUp: number, rules: Rules): string {
   const hand = sentenceHand(ranks)
   const vs = `against a dealer ${upLabel(dealerUp)}`
   if (action === 'S') return `You stood on ${hand} ${vs}.`
   if (action === 'H') return `You hit ${hand} ${vs}.`
+  if (action === 'D' && offersFreeDouble(ranks, rules)) return `You took a free double on ${hand} ${vs}.`
   if (action === 'D') return `You doubled on ${hand} ${vs}.`
+  if (action === 'P' && offersFreeSplit(ranks, rules)) return `You took a free split on ${hand} ${vs}.`
   if (action === 'P') return `You split ${hand} ${vs}.`
   return `You surrendered ${hand} ${vs}.`
+}
+
+function ticketFooter(trials: number, rules: Rules): string {
+  const lines = [
+    `Priced from ${trials.toLocaleString('en-US')} shuffles of the unseen shoe, before the next card was drawn. Later decisions in those shuffles follow basic strategy for these rules.`,
+  ]
+  if (rules.freeBet) {
+    lines.push('Hard 9, 10, and 11 take a free double. Every pair except tens takes a free split. A dealer 22 pushes.')
+  }
+  if (rules.noBust) lines.push('A player total over 21 pushes.')
+  return lines.join(' ')
 }
 
 function actionTicket(
@@ -432,11 +490,21 @@ function actionTicket(
   trials: number,
   regret: number,
   study = false,
+  rules?: Rules,
 ): TicketModel {
+  const ruleSet = rules ?? {
+    decks: 6,
+    hitSoft17: false,
+    das: true,
+    lateSurrender: false,
+    blackjackPays: 1.5,
+    freeBet: false,
+    noBust: false,
+  }
   const maxEv = Math.max(...legal.map((a) => ev[a]))
   const rows: TicketRow[] = legal
     .map((code) => ({
-      label: ACTION_LABEL[code],
+      label: actionLabel(code, ranks, ruleSet),
       perDollar: ev[code],
       onBet: study ? null : ev[code] * bet,
       mark: undefined as TicketRow['mark'],
@@ -462,9 +530,9 @@ function actionTicket(
     kicker: study ? 'Study price · fresh shoe' : 'Priced before the next card',
     title: study
       ? `${capitalize(sentenceHand(ranks))} against a dealer ${upLabel(dealerUp)}.`
-      : choiceTitle(action, ranks, dealerUp),
+      : choiceTitle(action, ranks, dealerUp, ruleSet),
     rows: rows.map(({ label, perDollar, onBet, mark }) => ({ label, perDollar, onBet, mark })),
-    footer: `Priced from ${trials.toLocaleString('en-US')} shuffles of the unseen shoe, before the next card was drawn. Later decisions in those shuffles follow basic strategy for these rules.`,
+    footer: ticketFooter(trials, ruleSet),
     note: study
       ? 'Nothing is recorded. The lesson only counts a choice you make before the price is shown.'
       : regret <= 0.004

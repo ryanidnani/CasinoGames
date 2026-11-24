@@ -322,6 +322,24 @@ export function Blackjack() {
               />
               Late surrender
             </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={rules.freeBet}
+                disabled={!idle}
+                onChange={(event) => updateRules({ freeBet: event.target.checked })}
+              />
+              Free bet
+            </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={rules.noBust}
+                disabled={!idle}
+                onChange={(event) => updateRules({ noBust: event.target.checked })}
+              />
+              No bust
+            </label>
             <label>
               Blackjack pays
               <select
@@ -334,7 +352,34 @@ export function Blackjack() {
               </select>
             </label>
           </div>
-          <p className="rule-note">A new deck count reshuffles before the next hand. The other rules apply to the next decision.</p>
+          <div className="presets">
+            <button type="button" disabled={!idle} onClick={() => updateRules({ freeBet: false, noBust: false })}>
+              Standard
+            </button>
+            <button
+              type="button"
+              disabled={!idle}
+              onClick={() =>
+                updateRules({
+                  decks: 6,
+                  hitSoft17: true,
+                  das: true,
+                  lateSurrender: false,
+                  blackjackPays: 1.5,
+                  freeBet: true,
+                  noBust: false,
+                })
+              }
+            >
+              Free bet rules
+            </button>
+            <button type="button" disabled={!idle} onClick={() => updateRules({ freeBet: false, noBust: true })}>
+              No bust
+            </button>
+          </div>
+          <p className="rule-note">
+            Free bet matches a double on hard 9, 10, or 11, and a split of any pair except tens. A loss costs the original bet, and a dealer 22 pushes. No bust turns a player total over 21 into a push. A new deck count reshuffles before the next hand. The other rules apply to the next decision.
+          </p>
         </details>
       </section>
 

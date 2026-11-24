@@ -8,13 +8,13 @@ Deal from a shoe and choose hit, stand, double, split, or surrender before any p
 
 After 20 hands, the lesson lists the three spots where your choices gave up the most expected value. The line to remember: a correct decision can still lose.
 
-Rules you can change: decks, dealer soft 17, double after split, late surrender, and blackjack paying 3:2 or 6:5. The lesson is saved in this browser.
+Rules you can change: decks, dealer soft 17, double after split, late surrender, and blackjack paying 3:2 or 6:5. Free bet matches a double on hard 9, 10, or 11 and a split of any pair except tens, and a dealer 22 pushes. No bust turns a player total over 21 into a push. The lesson is saved in this browser.
 
 ## Baccarat
 
 The question on the page is the simulator. Flat betting, Martingale, and following the shoe play identical shoes with the same bankroll, table limits, and walk-away rules. The chart is there to show how a system can win a lot of sessions and still lose money. Banker wins pay 95¢ on the dollar.
 
-Under that, the shoe is read for memory. After each run of Banker or Player, the next hand is scored against the shoe’s usual rate, and a bet on the side of the run is priced per dollar. Ties push and do not break a run.
+Under that, a shoe shows its running mix: the percentage of Banker, Player, and Tie so far. The hands after a cutoff are scored against shoes that had the same opening mix, and a Banker bet on that remainder is priced per dollar.
 
 ## Hold’em
 

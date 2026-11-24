@@ -15,10 +15,25 @@ export function basicAction(args: {
   canSurrender: boolean
 }): 'H' | 'S' | 'D' | 'P' | 'R' {
   const { cards, dealerUp, rules } = args
+  if (args.canDouble && offersFreeDouble(cards, rules)) return 'D'
+  if (args.canSplit && offersFreeSplit(cards, rules)) return 'P'
   if (args.canSurrender && cards.length === 2 && shouldSurrender(cards, dealerUp, rules)) return 'R'
   if (args.canSplit && cards.length === 2 && isPair(cards) && shouldSplit(cards[0]!, dealerUp, rules)) return 'P'
   if (args.canDouble && cards.length === 2 && shouldDouble(cards, dealerUp, rules)) return 'D'
-  return hitOrStand(cards, dealerUp)
+  return hitOrStand(cards, dealerUp, rules)
+}
+
+/** Hard 9, 10, or 11. The casino matches the bet, and a loss costs only the original stake. */
+export function offersFreeDouble(cards: readonly number[], rules: Rules): boolean {
+  if (!rules.freeBet || cards.length !== 2) return false
+  const t = totals(cards)
+  return !t.soft && (t.total === 9 || t.total === 10 || t.total === 11)
+}
+
+/** Every pair except tens. The second hand wins a unit and loses nothing. */
+export function offersFreeSplit(cards: readonly number[], rules: Rules): boolean {
+  if (!rules.freeBet || cards.length !== 2 || !isPair(cards)) return false
+  return cards[0] !== 10
 }
 
 function shouldSurrender(cards: readonly number[], dealerUp: number, rules: Rules): boolean {
@@ -76,9 +91,14 @@ function shouldDouble(cards: readonly number[], dealerUp: number, rules: Rules):
   return false
 }
 
-function hitOrStand(cards: readonly number[], dealerUp: number): 'H' | 'S' {
+function hitOrStand(cards: readonly number[], dealerUp: number, rules: Rules): 'H' | 'S' {
   const t = totals(cards)
   const u = dealerUp
+  if (rules.noBust && !t.soft) {
+    if (t.total >= 18) return 'S'
+    if (t.total === 17) return u >= 8 || u === 1 ? 'H' : 'S'
+    return 'H'
+  }
   if (t.soft) {
     if (t.total <= 17) return 'H'
     if (t.total === 18) return u === 9 || u === 10 || u === 1 ? 'H' : 'S'

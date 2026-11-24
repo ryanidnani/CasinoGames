@@ -39,6 +39,24 @@ describe('basic strategy', () => {
     expect(basicAction({ cards: [9, 9], dealerUp: 7, rules, ...open })).toBe('S')
     expect(basicAction({ cards: [2, 2], dealerUp: 2, rules: { ...rules, das: false }, ...open })).toBe('H')
   })
+
+  it('takes every free double and every free split except tens', () => {
+    const free = { ...rules, freeBet: true, hitSoft17: true, lateSurrender: false }
+    expect(basicAction({ cards: [4, 5], dealerUp: 2, rules: free, ...open })).toBe('D')
+    expect(basicAction({ cards: [5, 5], dealerUp: 6, rules: free, ...open })).toBe('D')
+    expect(basicAction({ cards: [4, 4], dealerUp: 10, rules: free, ...open })).toBe('P')
+    expect(basicAction({ cards: [8, 8], dealerUp: 10, rules: free, ...open })).toBe('P')
+    expect(basicAction({ cards: [10, 10], dealerUp: 6, rules: free, ...open })).toBe('S')
+  })
+
+  it('hits stiffs when a bust pushes, and still stands on 18', () => {
+    const noBust = { ...rules, noBust: true }
+    const quiet = { canDouble: true, canSplit: false, canSurrender: false }
+    expect(basicAction({ cards: [10, 6], dealerUp: 6, rules: noBust, ...quiet })).toBe('H')
+    expect(basicAction({ cards: [10, 7], dealerUp: 10, rules: noBust, ...quiet })).toBe('H')
+    expect(basicAction({ cards: [10, 7], dealerUp: 6, rules: noBust, ...quiet })).toBe('S')
+    expect(basicAction({ cards: [10, 8], dealerUp: 10, rules: noBust, ...quiet })).toBe('S')
+  })
 })
 
 describe('expected value', () => {
@@ -136,6 +154,52 @@ describe('a dealt hand', () => {
     const doubled = act(deal(withShoe(doubleShoe), rules, rng), 'D', rules, rng, 15, 4)
     expect(doubled.phase).toBe('result')
     expect(doubled.handNet).toBe(50)
+  })
+
+  it('pays a free double twice on a win and only the original stake on a loss', () => {
+    const free = { ...rules, freeBet: true, hitSoft17: true, lateSurrender: false, das: true }
+    const pad = Array.from({ length: 48 }, () => card(3, 'D'))
+    const winShoe = [...pad, card(3, 'C'), card(10, 'H'), card(10, 'D'), card(5, 'S'), card(6, 'C'), card(6, 'H')]
+    const won = act(deal(withShoe(winShoe), free, rng), 'D', free, rng, 12, 5)
+    expect(won.phase).toBe('result')
+    expect(won.hands[0]?.bet).toBe(25)
+    expect(won.hands[0]?.winPay).toBe(50)
+    expect(won.handNet).toBe(50)
+    expect(won.ticket?.title.toLowerCase()).toContain('free double')
+
+    const loseShoe = [...pad, card(3, 'C'), card(5, 'H'), card(10, 'D'), card(5, 'S'), card(6, 'C'), card(6, 'H')]
+    const lost = act(deal(withShoe(loseShoe), free, rng), 'D', free, rng, 12, 6)
+    expect(lost.handNet).toBe(-25)
+  })
+
+  it('pushes a dealer 22 under free bet and pushes a player bust under no bust', () => {
+    const free = { ...rules, freeBet: true }
+    const pad = Array.from({ length: 48 }, () => card(4, 'D'))
+    const twentyTwo = [...pad, card(10, 'C'), card(6, 'H'), card(10, 'S'), card(6, 'D'), card(10, 'H')]
+    const pushed = act(deal(withShoe(twentyTwo), free, rng), 'S', free, rng, 12, 7)
+    expect(pushed.dealer.map((c) => c.rank)).toEqual([6, 6, 10])
+    expect(pushed.handNet).toBe(0)
+    const paid = act(deal(withShoe(twentyTwo), rules, rng), 'S', rules, rng, 12, 8)
+    expect(paid.handNet).toBe(25)
+
+    const noBust = { ...rules, noBust: true }
+    const bustShoe = [...pad, card(10, 'C'), card(9, 'H'), card(6, 'S'), card(10, 'D'), card(10, 'H')]
+    const busted = act(deal(withShoe(bustShoe), noBust, rng), 'H', noBust, rng, 12, 9)
+    expect(busted.handNet).toBe(0)
+    const ordinary = act(deal(withShoe(bustShoe), rules, rng), 'H', rules, rng, 12, 10)
+    expect(ordinary.handNet).toBe(-25)
+  })
+
+  it('deals a free split without charging the second hand', () => {
+    const free = { ...rules, freeBet: true, das: true }
+    const pad = Array.from({ length: 48 }, () => card(3, 'D'))
+    const splitShoe = [...pad, card(5, 'C'), card(10, 'H'), card(9, 'D'), card(8, 'S'), card(6, 'C'), card(8, 'H')]
+    const split = act(deal(withShoe(splitShoe), free, rng), 'P', free, rng, 12, 11)
+    expect(split.hands).toHaveLength(2)
+    expect(split.bankroll).toBe(975)
+    expect(split.hands[1]?.bet).toBe(0)
+    expect(split.hands[1]?.winPay).toBe(25)
+    expect(split.phase).toBe('play')
   })
 
   it('refunds half the bet on surrender', () => {

@@ -1,237 +1,173 @@
 import { pct } from '../lib/money'
 import { mulberry32 } from '../lib/rng'
-import { dealHand, openShoe, type Outcome, type Side } from './engine'
+import { dealHand, openShoe, type Outcome } from './engine'
 
-export type { Side }
+export type Mix = { banker: number; player: number; tie: number; hands: number }
 
-export type NextCount = { banker: number; player: number; tie: number }
-
-export type StreakRow = {
-  side: Side
-  /** 6 means six or more. */
-  length: number
-  next: NextCount
-}
-
-export type MemoryResult = {
+export type MixBin = {
+  id: string
+  label: string
+  min: number
+  max: number
   shoes: number
-  hands: number
-  banker: number
-  player: number
-  tie: number
-  afterLast: Record<Side, NextCount>
-  streaks: StreakRow[]
+  early: Mix
+  rest: Mix
 }
 
-export type SidePrice = {
-  centsLost: number
-  bets: number
-  profit: number
+export type MixStudy = {
+  shoes: number
+  splitAt: number
+  used: number
+  overall: Mix
+  bins: MixBin[]
 }
 
-const LENGTHS = [1, 2, 3, 4, 5, 6]
+export const MIX_BINS: { id: string; label: string; min: number; max: number }[] = [
+  { id: 'under40', label: 'Under 40% Banker', min: 0, max: 0.4 },
+  { id: '40', label: '40–45% Banker', min: 0.4, max: 0.45 },
+  { id: '45', label: '45–50% Banker', min: 0.45, max: 0.5 },
+  { id: '50', label: '50–55% Banker', min: 0.5, max: 0.55 },
+  { id: '55', label: '55–60% Banker', min: 0.55, max: 0.6 },
+  { id: '60', label: '60% Banker or more', min: 0.6, max: 1.0001 },
+]
 
-export function emptyMemory(): MemoryResult {
+export function emptyMix(): Mix {
+  return { banker: 0, player: 0, tie: 0, hands: 0 }
+}
+
+export function countMix(outcomes: readonly Outcome[]): Mix {
+  const mix = emptyMix()
+  for (const outcome of outcomes) mix[outcome] += 1
+  mix.hands = outcomes.length
+  return mix
+}
+
+export function share(mix: Mix, side: keyof Omit<Mix, 'hands'>): number {
+  return mix.hands === 0 ? 0 : mix[side] / mix.hands
+}
+
+export function binIndex(bankerShare: number): number {
+  const found = MIX_BINS.findIndex((bin, index) => {
+    const end = index === MIX_BINS.length - 1 ? bankerShare <= bin.max : bankerShare < bin.max
+    return bankerShare >= bin.min && end
+  })
+  return found === -1 ? MIX_BINS.length - 1 : found
+}
+
+export function emptyStudy(splitAt: number): MixStudy {
   return {
     shoes: 0,
-    hands: 0,
-    banker: 0,
-    player: 0,
-    tie: 0,
-    afterLast: { banker: emptyNext(), player: emptyNext() },
-    streaks: (['banker', 'player'] as const).flatMap((side) =>
-      LENGTHS.map((length) => ({ side, length, next: emptyNext() })),
-    ),
+    splitAt,
+    used: 0,
+    overall: emptyMix(),
+    bins: MIX_BINS.map((bin) => ({ ...bin, shoes: 0, early: emptyMix(), rest: emptyMix() })),
   }
 }
 
-export function runLabel(side: Side, length: number): string {
-  const name = side === 'banker' ? 'Banker' : 'Player'
-  if (length >= 6) return `6 or more ${name}s`
-  if (length === 1) return `1 ${name}`
-  return `${length} ${name}s`
+/** Record one shoe. The opening `splitAt` hands are the past. The rest is the future. */
+export function observeShoe(study: MixStudy, outcomes: readonly Outcome[]): void {
+  study.shoes += 1
+  if (outcomes.length < study.splitAt + 15) return
+  const early = countMix(outcomes.slice(0, study.splitAt))
+  const rest = countMix(outcomes.slice(study.splitAt))
+  const bin = study.bins[binIndex(share(early, 'banker'))]!
+  addMix(bin.early, early)
+  addMix(bin.rest, rest)
+  bin.shoes += 1
+  addMix(study.overall, countMix(outcomes))
+  study.used += 1
 }
 
-export function observeShoe(result: MemoryResult, outcomes: readonly Outcome[]): void {
-  let side: Side | null = null
-  let streak = 0
-  for (const outcome of outcomes) {
-    result.hands += 1
-    if (outcome === 'banker') result.banker += 1
-    else if (outcome === 'player') result.player += 1
-    else result.tie += 1
-
-    if (side) {
-      const length = Math.min(streak, 6)
-      const row = result.streaks.find((item) => item.side === side && item.length === length)
-      add(row!.next, outcome)
-      add(result.afterLast[side], outcome)
-    }
-
-    if (outcome === 'tie') continue
-    if (side === outcome) streak += 1
-    else {
-      side = outcome
-      streak = 1
-    }
-  }
-}
-
-export function readMemory(shoes: number, seed: number, decks = 8): MemoryResult {
+export function readMix(shoes: number, seed: number, splitAt: number, decks = 8): MixStudy {
   const rng = mulberry32(seed)
-  const result = emptyMemory()
-  for (let i = 0; i < shoes; i++) {
-    observeShoe(result, dealShoe(decks, rng))
-    result.shoes += 1
-  }
-  return result
+  const study = emptyStudy(splitAt)
+  for (let i = 0; i < shoes; i++) observeShoe(study, dealShoe(decks, rng))
+  return study
 }
 
-export async function readMemoryAsync(
+export async function readMixAsync(
   shoes: number,
   seed: number,
+  splitAt: number,
   onProgress: (fraction: number) => void,
   cancelled: () => boolean,
   decks = 8,
-): Promise<MemoryResult | null> {
+): Promise<MixStudy | null> {
   const rng = mulberry32(seed)
-  const result = emptyMemory()
+  const study = emptyStudy(splitAt)
   for (let i = 0; i < shoes; i++) {
     if (cancelled()) return null
-    observeShoe(result, dealShoe(decks, rng))
-    result.shoes += 1
+    observeShoe(study, dealShoe(decks, rng))
     if (i % 40 === 0) {
       onProgress(i / shoes)
       await new Promise((resolve) => setTimeout(resolve, 0))
     }
   }
   onProgress(1)
-  return result
+  return study
 }
 
-/** House take, in cents per dollar wagered. Ties are wagers that push. */
-export function sidePrice(next: NextCount, side: Side): SidePrice {
-  const bets = next.banker + next.player + next.tie
-  const profit = side === 'banker' ? next.banker * 0.95 - next.player : next.player - next.banker
-  return { bets, profit, centsLost: bets === 0 ? 0 : (-profit / bets) * 100 }
+/** House take on a Banker bet, in cents per dollar. Ties are wagers that push. */
+export function bankerCents(mix: Mix): number {
+  if (mix.hands === 0) return 0
+  const profit = mix.banker * 0.95 - mix.player
+  return (-profit / mix.hands) * 100
 }
 
-export function decisiveRate(next: NextCount, side: Side): number {
-  const n = next.banker + next.player
-  if (n === 0) return 0
-  return side === 'banker' ? next.banker / n : next.player / n
-}
-
-export function narrateMemory(result: MemoryResult): string[] {
-  const decisive = result.banker + result.player
-  if (decisive === 0) return ['These shoes produced no decisive hands.']
-  const bankerRate = result.banker / decisive
-  const usual = sidePrice({ banker: result.banker, player: result.player, tie: result.tie }, 'banker')
+export function narrateMix(study: MixStudy): string[] {
+  if (study.used === 0) return ['These shoes were too short to split into a past and a future.']
   const lines = [
-    `In ${result.shoes.toLocaleString('en-US')} shoes, Banker won ${pct(bankerRate)} of the hands that were not ties. A $1 Banker bet on every hand ${took(usual.centsLost)} per dollar.`,
+    `Across ${study.used.toLocaleString('en-US')} shoes, the full shoe was ${mixLine(study.overall)}. A $1 Banker bet on every hand ${took(bankerCents(study.overall))} per dollar.`,
   ]
-
-  const focus = streak(result, 'banker', 3)
-  const focusNext = focus?.next ?? emptyNext()
-  const focusN = focusNext.banker + focusNext.player
-  const focusRate = focusN === 0 ? 0 : focusNext.banker / focusN
-  const focusGap = focusRate - bankerRate
-  const focusPrice = sidePrice(focusNext, 'banker')
-  if (focusN === 0) {
-    lines.push('This sample never reached three Bankers in a row.')
-  } else {
+  const hot = study.bins[study.bins.length - 1]!
+  const cold = study.bins[0]!
+  if (hot.shoes >= 20) {
     lines.push(
-      `After three Bankers, the next decisive hand was Banker ${pct(focusRate)} of the time, ${fromUsual(focusGap)} (${focusN.toLocaleString('en-US')} hands). A Banker bet on the hands that followed that run ${took(focusPrice.centsLost)} per dollar.`,
+      `When the first ${study.splitAt} hands were ${hot.label.toLowerCase()} — ${mixLine(hot.early)} in ${hot.shoes.toLocaleString('en-US')} shoes — the rest of the shoe was ${mixLine(hot.rest)}.`,
     )
-    lines.push(noiseLine(focusRate, focusN, focusGap))
+    lines.push(carrySentence(hot, study.overall))
+    lines.push(
+      `Betting Banker on those remaining hands ${took(bankerCents(hot.rest))} per dollar. Betting Banker on the whole shoe ${took(bankerCents(study.overall))} per dollar.`,
+    )
   }
-
-  const widest = widestShift(result, bankerRate)
-  if (widest && (widest.row.side !== 'banker' || widest.row.length !== 3) && notable(widest.rate, widest.n, widest.gap)) {
-    const name = widest.row.side === 'banker' ? 'Banker' : 'Player'
+  if (cold.shoes >= 20) {
     lines.push(
-      `The widest shift was after ${runLabel(widest.row.side, widest.row.length)}: the next decisive hand was ${name} ${pct(widest.same)} of the time, ${fromUsual(widest.gap)}. That is about ${cents(Math.abs(widest.centsShift))} per dollar ${widest.centsShift > 0 ? 'toward a Banker bet' : 'against a Banker bet'}.`,
+      `When the opening was ${cold.label.toLowerCase()} (${mixLine(cold.early)}), the rest was ${mixLine(cold.rest)}.`,
     )
-  } else if (focusN > 0 && noRunClearsNoise(result, bankerRate)) {
-    lines.push('From a single winner through six or more, no run with at least 200 hands cleared its own sampling noise.')
   }
   return lines
 }
 
-function noiseLine(rate: number, n: number, gap: number): string {
-  if (n < 200) return 'That run showed up too rarely to read a rate from it.'
-  const band = 2 * Math.sqrt((rate * (1 - rate)) / n)
-  const bandText = `about ±${(band * 100).toFixed(1)} points`
-  if (Math.abs(gap) <= band) {
-    return `A gap of that size sits inside the sampling noise, ${bandText}. The run left the next hand near the usual rate.`
+export function mixLine(mix: Mix): string {
+  return `${pct(share(mix, 'banker'))} Banker, ${pct(share(mix, 'player'))} Player, ${pct(share(mix, 'tie'))} Tie`
+}
+
+function carrySentence(bin: MixBin, overall: Mix): string {
+  const restRate = share(bin.rest, 'banker')
+  const usual = share(overall, 'banker')
+  const gap = restRate - usual
+  const n = bin.rest.hands
+  const band = n < 2 ? 1 : 2 * Math.sqrt((restRate * (1 - restRate)) / n)
+  const points = `${(Math.abs(gap) * 100).toFixed(1)} points ${gap > 0.0005 ? 'toward Banker' : gap < -0.0005 ? 'toward Player' : 'from the usual rate'}`
+  if (n >= 200 && Math.abs(gap) <= band) {
+    return `The rest sat ${points} from the shoe’s usual Banker rate, inside the sampling noise of about ±${(band * 100).toFixed(1)} points. The opening percentage did not carry forward.`
   }
-  return `That gap clears the sampling noise, ${bandText}.`
-}
-
-function noRunClearsNoise(result: MemoryResult, bankerRate: number): boolean {
-  let saw = false
-  for (const row of result.streaks) {
-    const n = row.next.banker + row.next.player
-    if (n < 200) continue
-    saw = true
-    const rate = row.next.banker / n
-    if (notable(rate, n, rate - bankerRate)) return false
+  if (n >= 200 && Math.abs(gap) > band) {
+    return `The rest sat ${points} from the shoe’s usual Banker rate, outside the sampling noise of about ±${(band * 100).toFixed(1)} points.`
   }
-  return saw
-}
-
-function widestShift(result: MemoryResult, bankerRate: number): {
-  row: StreakRow
-  rate: number
-  same: number
-  n: number
-  gap: number
-  centsShift: number
-} | null {
-  const tieRate = result.hands === 0 ? 0 : result.tie / result.hands
-  let best: ReturnType<typeof widestShift> = null
-  for (const row of result.streaks) {
-    const n = row.next.banker + row.next.player
-    if (n < 200) continue
-    const rate = row.next.banker / n
-    const gap = rate - bankerRate
-    const same = row.side === 'banker' ? rate : 1 - rate
-    const centsShift = gap * (1 - tieRate) * 1.95 * 100
-    if (!best || Math.abs(gap) > Math.abs(best.gap)) best = { row, rate, same, n, gap, centsShift }
-  }
-  return best
-}
-
-function notable(rate: number, n: number, gap: number): boolean {
-  if (n < 200) return false
-  const band = 2 * Math.sqrt((rate * (1 - rate)) / n)
-  return Math.abs(gap) > band
-}
-
-function fromUsual(gap: number): string {
-  const points = (Math.abs(gap) * 100).toFixed(1)
-  if (Math.abs(gap) < 0.0005) return 'level with the usual Banker rate'
-  return `${points} points ${gap > 0 ? 'toward Banker' : 'toward Player'}`
-}
-
-function cents(amount: number): string {
-  return `${Math.abs(amount).toFixed(2)}¢`
+  return `That opening showed up ${n.toLocaleString('en-US')} hands later, too few to read a rate from it.`
 }
 
 function took(centsLost: number): string {
-  return `${centsLost < -0.005 ? 'won' : 'lost'} ${cents(centsLost)}`
+  const body = `${Math.abs(centsLost).toFixed(2)}¢`
+  return `${centsLost < -0.005 ? 'won' : 'lost'} ${body}`
 }
 
-function streak(result: MemoryResult, side: Side, length: number): StreakRow | undefined {
-  return result.streaks.find((row) => row.side === side && row.length === length)
-}
-
-function emptyNext(): NextCount {
-  return { banker: 0, player: 0, tie: 0 }
-}
-
-function add(next: NextCount, outcome: Outcome): void {
-  next[outcome] += 1
+function addMix(into: Mix, extra: Mix): void {
+  into.banker += extra.banker
+  into.player += extra.player
+  into.tie += extra.tie
+  into.hands += extra.hands
 }
 
 function dealShoe(decks: number, rng: () => number): Outcome[] {

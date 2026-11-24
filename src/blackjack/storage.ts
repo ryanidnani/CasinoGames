@@ -24,7 +24,7 @@ export function loadSave(): Save | null {
       version: 1,
       bankroll: numberOr(parsed.bankroll, 1000),
       bet: numberOr(parsed.bet, 25),
-      rules: parsed.rules,
+      rules: withVariants(parsed.rules),
       handsPlayed: numberOr(parsed.handsPlayed, 0),
       lessonStart: numberOr(parsed.lessonStart, 0),
       reviewShownFor: numberOr(parsed.reviewShownFor, 0),
@@ -41,6 +41,10 @@ export function writeSave(save: Save): void {
   } catch {
     /* The lesson still works for this visit if storage is blocked. */
   }
+}
+
+function withVariants(rules: Rules): Rules {
+  return { ...rules, freeBet: rules.freeBet === true, noBust: rules.noBust === true }
 }
 
 function isRules(value: unknown): value is Rules {

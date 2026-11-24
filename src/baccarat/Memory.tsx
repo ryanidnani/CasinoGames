@@ -1,58 +1,94 @@
 import { useEffect, useRef, useState } from 'react'
-import {
-  decisiveRate,
-  narrateMemory,
-  readMemoryAsync,
-  runLabel,
-  sidePrice,
-  type MemoryResult,
-  type Side,
-} from './memory'
+import { dealHand, openShoe, type Outcome } from './engine'
+import { binIndex, countMix, mixLine, narrateMix, readMixAsync, share, type MixStudy } from './memory'
 
 const SHOE_COUNTS = [1000, 4000, 16000]
+const CUTS = [10, 20, 30]
+
+type LiveShoe = { cards: number[]; index: number; outcomes: Outcome[] }
 
 export function Memory() {
   const [shoes, setShoes] = useState(4000)
+  const [splitAt, setSplitAt] = useState(20)
   const [seed, setSeed] = useState(11)
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState(0)
-  const [result, setResult] = useState<MemoryResult | null>(null)
+  const [study, setStudy] = useState<MixStudy | null>(null)
+  const [live, setLive] = useState<LiveShoe>(() => dealTo(20))
   const runId = useRef(0)
 
   useEffect(() => {
     const id = ++runId.current
-    void load(id, shoes, seed)
+    void load(id, shoes, seed, splitAt)
     return () => {
       runId.current += 1
     }
-  }, [shoes, seed])
+  }, [shoes, seed, splitAt])
 
-  async function load(id: number, count: number, sample: number) {
+  async function load(id: number, count: number, sample: number, cut: number) {
     setRunning(true)
     setProgress(0)
-    const produced = await readMemoryAsync(
+    const produced = await readMixAsync(
       count,
       sample,
+      cut,
       (fraction) => {
         if (runId.current === id) setProgress(fraction)
       },
       () => runId.current !== id,
     )
     if (runId.current !== id) return
-    if (produced) setResult(produced)
+    if (produced) setStudy(produced)
     setRunning(false)
   }
 
-  const paragraphs = result ? narrateMemory(result) : []
-  const decisive = result ? result.banker + result.player : 0
-  const usualBanker = decisive === 0 || !result ? 0 : result.banker / decisive
-  const usualPlayer = decisive === 0 || !result ? 0 : result.player / decisive
+  const early = countMix(live.outcomes.slice(0, splitAt))
+  const rest = countMix(live.outcomes.slice(splitAt))
+  const ready = live.outcomes.length >= splitAt
+  const bin = study && ready ? study.bins[binIndex(share(early, 'banker'))] : null
+  const paragraphs = study ? narrateMix(study) : []
+  const liveLine = live.outcomes.length === 0 ? '' : mixLine(countMix(live.outcomes))
 
   return (
     <section className="memory" data-testid="baccarat-memory">
-      <p className="question">After a run of winners, does the next hand follow the past?</p>
+      <p className="question">
+        {live.outcomes.length === 0
+          ? 'As a shoe is dealt, it builds a percentage of Banker, Player, and Tie. Do the hands still to come follow that mix?'
+          : `This shoe is ${liveLine}. Do the hands still to come follow that mix?`}
+      </p>
+      <div className="mix" data-testid="mix-live">
+        <MixStat label="Banker" value={share(countMix(live.outcomes), 'banker')} tone="banker" />
+        <MixStat label="Player" value={share(countMix(live.outcomes), 'player')} tone="player" />
+        <MixStat label="Tie" value={share(countMix(live.outcomes), 'tie')} tone="tie" />
+      </div>
+      <p className="hint">
+        {live.outcomes.length.toLocaleString('en-US')} hands in this shoe.
+        {ready ? ` The first ${splitAt} were ${mixLine(early)}.` : ` The past starts once ${splitAt} hands are dealt.`}
+        {rest.hands > 0 ? ` Since then, this shoe has been ${mixLine(rest)}.` : ''}
+      </p>
+      {bin && bin.shoes > 0 ? (
+        <p className="finding">
+          Shoes whose first {splitAt} hands were {bin.label.toLowerCase()} ({bin.shoes.toLocaleString('en-US')} of them) finished the rest at {mixLine(bin.rest)}.
+        </p>
+      ) : null}
+      <div className="run-row">
+        <button type="button" className="action" data-testid="mix-next" onClick={() => setLive((current) => dealNext(current))}>
+          Deal the next hand
+        </button>
+        <button type="button" className="action" onClick={() => setLive(dealTo(splitAt))}>
+          New shoe
+        </button>
+      </div>
       <p className="question-sub">
-        Ties stay on the board and do not break a run. Read the next hand after each run across{' '}
+        Split every shoe after{' '}
+        <span className="segment" role="group" aria-label="hands before the split">
+          {CUTS.map((count) => (
+            <button key={count} type="button" aria-pressed={splitAt === count} onClick={() => setSplitAt(count)}>
+              {count}
+            </button>
+          ))}
+        </span>{' '}
+        hands and read the rest across{' '}
         <span className="segment" role="group" aria-label="shoes">
           {SHOE_COUNTS.map((count) => (
             <button key={count} type="button" aria-pressed={shoes === count} onClick={() => setShoes(count)}>
@@ -72,77 +108,68 @@ export function Memory() {
           </div>
         ) : null}
       </div>
-      <p className="hint">Each shoe is an 8-deck shoe, dealt until fewer than six cards remain. A tie pushes a bet and leaves the run as it was.</p>
+      <p className="hint">Each shoe is eight decks, dealt until fewer than six cards remain. Ties count in the percentages and push a Banker bet.</p>
 
-      {result ? (
+      {study ? (
         <div className="findings" data-testid="memory-results">
           {paragraphs.map((paragraph) => (
             <p key={paragraph} className="finding">
               {paragraph}
             </p>
           ))}
-          <div className="charts">
-            <figure>
-              <figcaption>After Bankers in a row, how often the next decisive hand is Banker. The dashed line is {pct1(usualBanker)} in these shoes.</figcaption>
-              <RateChart result={result} side="banker" usual={usualBanker} />
-            </figure>
-            <figure>
-              <figcaption>After Players in a row, how often the next decisive hand is Player. The dashed line is {pct1(usualPlayer)}.</figcaption>
-              <RateChart result={result} side="player" usual={usualPlayer} />
-            </figure>
-          </div>
+          <figure>
+            <figcaption>
+              The pale bar is Banker so far. The red bar is Banker in the hands that followed. The dashed line is {pct1(share(study.overall, 'banker'))} for the whole shoe.
+            </figcaption>
+            <MixChart study={study} />
+          </figure>
           <div className="compare memory-table" role="table">
             <div className="compare-head" role="row">
-              <span>Past</span>
-              <span>Next same side</span>
-              <span>Vs usual</span>
-              <span>Noise</span>
-              <span>Hands</span>
-              <span>Bet that side</span>
+              <span>So far</span>
+              <span>Shoes</span>
+              <span>Opening</span>
+              <span>Rest of the shoe</span>
             </div>
-            {result.streaks.map((row) => {
-              const n = row.next.banker + row.next.player
-              const same = decisiveRate(row.next, row.side)
-              const usual = row.side === 'banker' ? usualBanker : usualPlayer
-              const price = sidePrice(row.next, row.side)
-              const gap = same - usual
-              const band = n < 2 ? 0 : 2 * Math.sqrt((same * (1 - same)) / n)
-              const clears = n >= 200 && Math.abs(gap) > band
-              return (
-                <div key={`${row.side}-${row.length}`} className={clears ? 'compare-row hot' : 'compare-row'} role="row">
-                  <span>{runLabel(row.side, row.length)}</span>
-                  <span>{n === 0 ? '—' : pct1(same)}</span>
-                  <span>{n === 0 ? '—' : signedPoints(gap)}</span>
-                  <span>{n < 2 ? '—' : `±${(band * 100).toFixed(1)} pts`}</span>
-                  <span>{n.toLocaleString('en-US')}</span>
-                  <span>{price.bets === 0 ? '—' : signedCents(price.centsLost)}</span>
-                </div>
-              )
-            })}
+            {study.bins.map((row) => (
+              <div key={row.id} className="compare-row" role="row">
+                <span>{row.label}</span>
+                <span>{row.shoes.toLocaleString('en-US')}</span>
+                <span>{row.shoes === 0 ? '—' : mixLine(row.early)}</span>
+                <span>{row.shoes === 0 ? '—' : mixLine(row.rest)}</span>
+              </div>
+            ))}
           </div>
-          <p className="hint">Hands are the next results that were not ties. Noise is how far that row can wander by chance. The last column is a $1 bet on the side of the run, and a tie pushes. A one-point swing in the win rate moves that price by about 2¢.</p>
+          <p className="hint">Opening and rest are Banker / Player / Tie. The rest is every hand after the cut in shoes that opened in that range.</p>
         </div>
       ) : null}
     </section>
   )
 }
 
-function RateChart({ result, side, usual }: { result: MemoryResult; side: Side; usual: number }) {
-  const rows = result.streaks.filter((row) => row.side === side)
+function MixStat({ label, value, tone }: { label: string; value: number; tone: string }) {
+  return (
+    <div className={tone}>
+      <strong>{pct1(value)}</strong>
+      <span>{label}</span>
+    </div>
+  )
+}
+
+function MixChart({ study }: { study: MixStudy }) {
   const width = 640
   const height = 220
-  const yMin = 0.38
-  const yMax = 0.64
+  const yMin = 0.22
+  const yMax = 0.75
   const yOf = (rate: number) => {
     const t = (Math.min(yMax, Math.max(yMin, rate)) - yMin) / (yMax - yMin)
     return height - 28 - t * (height - 52)
   }
   const left = 36
+  const rows = study.bins
   const slot = (width - left) / rows.length
-  const baseline = yOf(usual)
-  const fill = side === 'banker' ? '#c4482d' : '#8eb4d4'
+  const baseline = yOf(share(study.overall, 'banker'))
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Next ${side} rate after runs of ${side}`}>
+    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Banker percentage so far and in the rest of the shoe">
       {[0.4, 0.5, 0.6].map((mark) => (
         <text key={mark} x="0" y={yOf(mark) + 4} className="tick">
           {Math.round(mark * 100)}%
@@ -150,16 +177,15 @@ function RateChart({ result, side, usual }: { result: MemoryResult; side: Side; 
       ))}
       <line x1={left} x2={width} y1={baseline} y2={baseline} className="axis" />
       {rows.map((row, index) => {
-        const n = row.next.banker + row.next.player
-        const rate = n === 0 ? usual : decisiveRate(row.next, side)
-        const x = left + index * slot + slot * 0.22
-        const y = yOf(rate)
-        const bar = height - 28 - y
+        const x = left + index * slot
+        const early = row.shoes === 0 ? 0 : share(row.early, 'banker')
+        const restRate = row.shoes === 0 ? 0 : share(row.rest, 'banker')
         return (
-          <g key={row.length}>
-            <rect x={x} y={y} width={slot * 0.56} height={Math.max(bar, 0)} rx="3" fill={fill} opacity={n < 200 ? 0.35 : 0.9} />
-            <text x={x + slot * 0.28} y={height - 8} textAnchor="middle" className="tick">
-              {row.length >= 6 ? '6+' : String(row.length)}
+          <g key={row.id}>
+            <rect x={x + slot * 0.16} y={yOf(early)} width={slot * 0.28} height={Math.max(height - 28 - yOf(early), 0)} rx="3" fill="#d4b483" opacity={row.shoes === 0 ? 0.25 : 0.95} />
+            <rect x={x + slot * 0.5} y={yOf(restRate)} width={slot * 0.28} height={Math.max(height - 28 - yOf(restRate), 0)} rx="3" fill="#c4482d" opacity={row.shoes === 0 ? 0.25 : 0.9} />
+            <text x={x + slot * 0.5} y={height - 8} textAnchor="middle" className="tick">
+              {row.label.startsWith('Under') ? '<40' : row.label.startsWith('60') ? '60+' : row.label.slice(0, 5)}
             </text>
           </g>
         )
@@ -172,16 +198,19 @@ function pct1(n: number): string {
   return `${(n * 100).toFixed(1)}%`
 }
 
-function signedPoints(gap: number): string {
-  const points = (Math.abs(gap) * 100).toFixed(1)
-  if (gap > 0.0005) return `+${points} pts`
-  if (gap < -0.0005) return `−${points} pts`
-  return '0.0 pts'
+function freshLive(): LiveShoe {
+  const opened = openShoe(8, Math.random)
+  return { cards: opened.cards, index: opened.index, outcomes: [] }
 }
 
-function signedCents(centsLost: number): string {
-  const body = `${Math.abs(centsLost).toFixed(2)}¢`
-  if (centsLost > 0.005) return `−${body}`
-  if (centsLost < -0.005) return `+${body}`
-  return body
+function dealNext(shoe: LiveShoe): LiveShoe {
+  if (shoe.cards.length - shoe.index < 6) return dealNext(freshLive())
+  const dealt = dealHand(shoe.cards, shoe.index)
+  return { cards: shoe.cards, index: dealt.index, outcomes: [...shoe.outcomes, dealt.winner] }
+}
+
+function dealTo(count: number): LiveShoe {
+  let shoe = freshLive()
+  for (let i = 0; i < count; i++) shoe = dealNext(shoe)
+  return shoe
 }

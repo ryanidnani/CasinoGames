@@ -9,6 +9,13 @@ export type Rules = {
   lateSurrender: boolean
   /** 1.5 is 3:2. 1.2 is 6:5. */
   blackjackPays: number
+  /**
+   * Free doubles on hard 9, 10, or 11, free splits on every pair except tens,
+   * and a dealer 22 pushes.
+   */
+  freeBet: boolean
+  /** A player total over 21 pushes. */
+  noBust: boolean
 }
 
 export const DEFAULT_RULES: Rules = {
@@ -17,6 +24,8 @@ export const DEFAULT_RULES: Rules = {
   das: true,
   lateSurrender: true,
   blackjackPays: 1.5,
+  freeBet: false,
+  noBust: false,
 }
 
 export const ACTION_LABEL: Record<ActionName, string> = {
@@ -36,11 +45,18 @@ export type Card = {
 
 export type LiveHand = {
   cards: Card[]
+  /** Money already taken. A push returns this. A free hand has none. */
   bet: number
+  /** Profit added on a win. An ordinary hand matches `bet`. A free double pays twice the unit. */
+  winPay: number
+  /** Size of the original wager. Free doubles and free splits are measured against it. */
+  unit: number
   doubled: boolean
   stood: boolean
   surrendered: boolean
   fromSplit: boolean
+  /** Split from aces: one card, then stand, unless that card is another ace. */
+  splitAces: boolean
 }
 
 export type Decision = {
